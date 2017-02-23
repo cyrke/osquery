@@ -57,6 +57,7 @@ endif()
 if(LINUX)
   set(TABLE_PLATFORM "linux")
 
+  ADD_OSQUERY_LINK_ADDITIONAL("smartctl")
   ADD_OSQUERY_LINK_ADDITIONAL("libresolv.so")
   ADD_OSQUERY_LINK_ADDITIONAL("cryptsetup devmapper")
   ADD_OSQUERY_LINK_ADDITIONAL("gcrypt gpg-error")
