@@ -58,9 +58,6 @@ if(NOT SKIP_AWS AND NOT WINDOWS)
 endif()
 
 if(NOT WINDOWS)
-  ADD_OSQUERY_LINK_ADDITIONAL("z")
-  ADD_OSQUERY_LINK_ADDITIONAL("pthread")
-
   if(APPLE)
     ADD_OSQUERY_LINK_ADDITIONAL("${BUILD_DEPS}/lib/librdkafka.dylib")
   else()
