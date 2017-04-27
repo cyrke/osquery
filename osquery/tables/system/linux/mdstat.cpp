@@ -19,13 +19,18 @@ namespace tables {
 
 std::string kMDStatPath = "/proc/mdstat";
 
+struct MDDrive {
+  std::string name;
+  size_t pos;
+};
+
 struct MDDevice {
   std::string name;
   std::string status;
   std::string raidLevel;
   std::string usableSize;
   std::string other;
-  std::vector<std::string> drives;
+  std::vector<MDDrive> drives;
   std::string healthyDrives;
   std::string driveStatuses;
   std::string recovery;
@@ -92,6 +97,22 @@ inline void getLines(std::vector<std::string>& lines) {
   }
 }
 
+MDDrive parseMDDrive(std::string& name) {
+  MDDrive drive;
+  drive.name = name;
+
+  std::size_t start = name.find('[');
+  std::size_t end = name.find(']');
+  if (start == std::string::npos || end == std::string::npos) {
+    std::cerr << "Unexpected drive name format: " << name;
+    return drive;
+  }
+
+  drive.pos = std::stoi(name.substr(start + 1, end - start - 1));
+
+  return drive;
+}
+
 /**
  * @brief Parse mdstat text blob into MDStat struct
  *
@@ -147,7 +168,7 @@ void parseMDStat(MDStat& result) {
         mdd.raidLevel = settings[1];
 
         for (size_t i = 2; i < settings.size(); i++) {
-          mdd.drives.push_back(settings[i]);
+          mdd.drives.push_back(parseMDDrive(settings[i]));
         }
       }
 
@@ -216,6 +237,37 @@ void parseMDStat(MDStat& result) {
     }
 
     n += 1;
+  }
+}
+
+void getFullDrivesVector(std::vector<MDDrive>& oldDrives,
+                         std::vector<MDDrive>& newDrives,
+                         std::string const& statuses) {
+  size_t start;
+  if (oldDrives.size() < 1) {
+    start = 0;
+
+  } else {
+    statuses.at(0) == '_' ? start = oldDrives[0].pos - 1
+                          : start = oldDrives[0].pos;
+  }
+
+  for (size_t i = start; i < statuses.length(); i++) {
+    bool found = false;
+    for (auto& drive : oldDrives) {
+      if (i == drive.pos) {
+        newDrives.push_back(drive);
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      MDDrive newDrive;
+      newDrive.name = "missing[" + std::to_string(i) + "]";
+      newDrive.pos = i;
+      newDrives.push_back(newDrive);
+    }
   }
 }
 
@@ -308,35 +360,38 @@ QueryData genMDDrives(QueryContext& context) {
   parseMDStat(mds);
 
   for (auto& device : mds.devices) {
-    for (auto& drive : device.drives) {
-      std::size_t start = drive.find('[');
-      if (start == std::string::npos) {
-        LOG(WARNING) << "Unexpected device name format: " << drive << "\n";
-        continue;
+    // sort drives by pos
+    std::sort(device.drives.begin(),
+              device.drives.end(),
+              [](MDDrive& d1, MDDrive& d2) -> bool { return d1.pos < d2.pos; });
+
+    std::string statuses =
+        device.driveStatuses.substr(1, device.driveStatuses.length() - 2);
+
+    auto handleDriveStatus = [&](std::vector<MDDrive>& drives) {
+      for (size_t i = 0; i < statuses.length(); i++) {
+        Row r;
+        r["md_device_name"] = device.name;
+        r["drive_name"] = drives[i].name;
+        statuses.at(i) == 'U' ? r["status"] = "1" : r["status"] = "0";
+        results.push_back(r);
       }
+    };
 
-      std::size_t end = drive.find(']');
-      if (end == std::string::npos) {
-        LOG(WARNING) << "Unexpected device name format: " << drive << "\n";
-        continue;
-      }
+    // If lengths are equal then we can do a straight traversal
+    if (statuses.length() == device.drives.size()) {
+      handleDriveStatus(device.drives);
 
-      Row r;
-      r["md_device_name"] = device.name;
-      r["drive_name"] = drive;
-      // Assume last char of device name is ']'
-      int driveNum = std::stoi(drive.substr(start + 1, end - start - 1));
-      if (0 <= driveNum < device.driveStatuses.length() - 2) {
-        device.driveStatuses[driveNum + 1] == 'U' ? r["status"] = "1"
-                                                  : r["status"] = "0";
+      // Must find missing nodes and do straight traversal
+    } else if (statuses.length() > device.drives.size()) {
+      std::vector<MDDrive> newDrives;
+      getFullDrivesVector(device.drives, newDrives, statuses);
+      // Now do straight traversal
+      handleDriveStatus(newDrives);
 
-      } else {
-        LOG(WARNING) << "Drive number is out of range of expected range: got ->"
-                     << driveNum << "; expected max -> "
-                     << device.driveStatuses.length() - 2 << "\n";
-      }
-
-      results.push_back(r);
+    } else {
+      LOG(ERROR) << "Unexpected: More drives for " << device.name
+                 << " than status " << device.driveStatuses << " indicate.\n";
     }
   }
 
