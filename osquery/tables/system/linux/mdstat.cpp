@@ -104,7 +104,7 @@ MDDrive parseMDDrive(std::string& name) {
   std::size_t start = name.find('[');
   std::size_t end = name.find(']');
   if (start == std::string::npos || end == std::string::npos) {
-    std::cerr << "Unexpected drive name format: " << name;
+    LOG(ERROR) << "Unexpected drive name format: " << name;
     return drive;
   }
 
