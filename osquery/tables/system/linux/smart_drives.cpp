@@ -26,8 +26,8 @@
 namespace osquery {
 namespace tables {
 
-struct hwSmartCtl {
-  const char* driver;
+struct explicitDevice {
+  std::string driver;
   int maxID;
 };
 
@@ -36,13 +36,11 @@ struct hwSmartCtl {
 auto delUdevDevice = [](udev_device* d) { udev_device_unref(d); };
 
 // Look-up table for driver to smartctl controller name.
-static const std::map<std::string, std::string> kSWDriverToClter = {
-    {"ahci", "sat"},
-};
+// static const std::map<std::string> kSWDriverToClter = {"ahci", "mpt3sas"};
 
-static const std::map<std::string, hwSmartCtl> kHWDriverToClter = {
-    {"megaraid_sas", hwSmartCtl{"megaraid,", 127}},
-    {"hpsa", hwSmartCtl{"cciss,", 14}},
+static const std::map<std::string, explicitDevice> kExplicitDriverToDevice = {
+    {"megaraid_sas", explicitDevice{"megaraid,", 127}},
+    {"hpsa", explicitDevice{"cciss,", 14}},
 };
 
 void walkUdevSubSystem(
@@ -127,65 +125,16 @@ std::vector<std::string> getStorageCtlerClassDrivers() {
   return results;
 }
 
-bool getSmartCtlDeviceType(std::vector<std::string> const& storageDrivers,
-                           std::string& type,
-                           int& count) {
-  switch (storageDrivers.size()) {
-  case 1:
+void getSmartCtlDeviceType(std::vector<std::string> const& storageDrivers,
+                           std::vector<explicitDevice>& types) {
+  for (auto const& driver : storageDrivers) {
     try {
-      kSWDriverToClter.at(storageDrivers[0]);
-      // No need to do anything if is sw storage controller.
-      type = "";
-      return true;
+      explicitDevice dev;
+      dev = kExplicitDriverToDevice.at(driver);
+      types.push_back(dev);
     } catch (std::out_of_range) {
-      // Assume is not a sw driver, move on...
-    }
-
-    try {
-      hwSmartCtl hwc(kHWDriverToClter.at(storageDrivers[0]));
-      type = hwc.driver;
-      count = hwc.maxID;
-      return true;
-    } catch (std::out_of_range) {
-      LOG(WARNING) << "Driver not supported: " << storageDrivers[0];
-      // If none is found, none is supported.
-      return false;
-    }
-
-  case 2: {
-    std::string swc;
-    hwSmartCtl hwc;
-    auto getTypes = [&](int i, int j) -> bool {
-      try {
-        swc = kSWDriverToClter.at(storageDrivers[i]);
-        hwc = kHWDriverToClter.at(storageDrivers[j]);
-        count = hwc.maxID;
-        type = swc + "+" + std::string(hwc.driver);
-        return true;
-
-      } catch (std::out_of_range) {
-        return false;
-      }
-    };
-    // With current supported set of drivers, this should always hit.
-    if (getTypes(0, 1)) {
-      return true;
-    }
-
-    if (!getTypes(1, 0)) {
-      LOG(WARNING) << "Unsupported combination of storage controller drivers "
-                      "(when more than 1): one must be ahci and one must be a "
-                      "hardware RAID controller";
-      return false;
     }
   }
-
-  default:
-    LOG(WARNING) << "Cannot support more than 2 unique driver combinations";
-    return false;
-  }
-
-  return true;
 }
 
 void walkSmartDevices(std::function<void(libsmartctl::Client&,
@@ -200,23 +149,23 @@ void walkSmartDevices(std::function<void(libsmartctl::Client&,
   libsmartctl::Client& c = libsmartctl::Client::getClient();
 
   std::vector<std::string> storageDrivers = getStorageCtlerClassDrivers();
-  int count = 0;
-  std::string type;
-  if (!getSmartCtlDeviceType(storageDrivers, type, count)) {
-    // Logging handled in called function.
-    return;
-  }
+
+  std::vector<explicitDevice> types;
+  getSmartCtlDeviceType(storageDrivers, types);
 
   std::vector<std::string> devs = getBlkDevices();
   for (auto const& dev : devs) {
-    if (type != "") {
+    bool found = false;
+    for (auto const& type : types) {
       // If type is not null can skip the partitions
-      if (dev.find_first_of("0123456789") != std::string::npos) {
-        continue;
-      }
+      // THIS ASSUMPTION IS NO LONGER VALID see
+      // `nyc3nas10.nyc3.internal.digitalocean.com`
+      // if (dev.find_first_of("0123456789") != std::string::npos) {
+      //   continue;
+      // }
 
-      for (int i = 0; i < count; i++) {
-        std::string fullType = std::string(type) + std::to_string(i);
+      for (size_t i = 0; i <= type.maxID; i++) {
+        std::string fullType = type.driver + std::to_string(i);
 
         libsmartctl::CantIdDevResp cantId = c.cantIdDev(dev, fullType);
         if (cantId.err != NOERR) {
@@ -225,14 +174,19 @@ void walkSmartDevices(std::function<void(libsmartctl::Client&,
         }
         // If device is not identifiable, the type is invalid, skip
         if (!cantId.content) {
+          found = true;
           handleDevF(c, dev, fullType, i);
         }
       }
-
-      continue;
+      // If found, break out of types.
+      if (found) {
+        break;
+      }
     }
-
-    handleDevF(c, dev, type, -1);
+    // If none of the initial devices types work, we try auto detetction.
+    if (!found) {
+      handleDevF(c, dev, "", -1);
+    }
   }
 }
 
