@@ -275,7 +275,8 @@ mdu_disk_info_t getDiskInfo(std::string arrayName, int diskNum) {
   close(fd);
 
   if (status == -1) {
-    LOG(WARNING) << "Call to ioctl 'GET_DISK_INFO' failed: " << strerror(errno);
+    LOG(WARNING) << "Call to ioctl 'GET_DISK_INFO' " << arrayName
+                 << " failed: " << strerror(errno);
     return diskInfo;
   }
 
@@ -297,7 +298,8 @@ void getArrayInfo(std::string name, mdu_array_info_t& array) {
   close(fd);
 
   if (status == -1) {
-    LOG(ERROR) << "Call to ioctl 'GET_ARRAY_INFO' failed: " << strerror(errno);
+    LOG(ERROR) << "Call to ioctl 'GET_ARRAY_INFO' for " << name
+               << " failed: " << strerror(errno);
   }
 }
 
