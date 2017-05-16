@@ -153,6 +153,11 @@ std::string getPathByDevName(std::string name) {
           if (strcmp(name.c_str(), &devName[strlen(devName) - name.length()]) ==
               0) {
             devPath = devName;
+            /* If full filepath is not returned, we assume name is a child in
+             * udev root*/
+            if (devPath.find("/") != 0) {
+              devPath = "/dev/" + devPath;
+            }
             break;
           } else {
             devName = "";
@@ -490,7 +495,7 @@ void getDrivesForArray(std::string arrayName, QueryData& data) {
       Row r;
       r["md_device_name"] = arrayName;
       r["drive_name"] = getDevName(disk.major, disk.minor);
-      r["status"] = getDiskStateStr(disk.state);
+      r["state"] = getDiskStateStr(disk.state);
       r["slot"] = std::to_string(disk.raid_disk);
 
       /* We have to check here b/c otherwise we have no idea if the slot has
