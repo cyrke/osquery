@@ -25,36 +25,64 @@
 #include "osquery/events/linux/udev.h"
 #include <osquery/core/conversions.h>
 
+#include "osquery/tables/system/linux/md_tables.h"
+
 namespace osquery {
 namespace tables {
 
 std::string kMDStatPath = "/proc/mdstat";
 
-struct MDDrive {
-  std::string name;
-  size_t pos;
-};
+class MD : public MDInterface {
+ public:
+  /**
+   * @brief request disk information from MD drivers
+   *
+   * @param arrayName name of the md array, ie. `md0`
+   * @param diskInfo mdu_disk_info_t with number field filled
+   *
+   * @return bool indicating success of system call
+   */
+  bool getDiskInfo(std::string arrayName, mdu_disk_info_t& diskInfo) override;
 
-struct MDDevice {
-  std::string name;
-  std::string status;
-  std::string raidLevel;
-  std::string usableSize;
-  std::string other;
-  std::vector<MDDrive> drives;
-  std::string healthyDrives;
-  std::string driveStatuses;
-  std::string recovery;
-  std::string resync;
-  std::string reshape;
-  std::string bitmap;
-  std::string checkArray;
-};
+  /**
+   * @brief request array information from MD drivers
+   *
+   * @param name name of the md array, ie. `md0`
+   * @param array empty struct of mdu_array_info_t; will be filled out with info
+   *
+   * @return bool indicating success of system call
+   */
+  bool getArrayInfo(std::string name, mdu_array_info_t& array) override;
 
-struct MDStat {
-  std::string personalities;
-  std::vector<MDDevice> devices;
-  std::string unused;
+  /**
+   * @brief Parse mdstat text blob into MDStat struct
+   *
+   * @param lines mdstat file as a vector of lines
+   * @param result reference to a MDStat struct to store results into
+   *
+   * This function makes assumption about the structure of the mdstat text
+   * blobs. If the structure is not what it expects, the logs a warning message
+   * and moves on.
+   *
+   */
+  void parseMDStat(std::vector<std::string> lines, MDStat& result) override;
+
+  /**
+   * @brief gets the path to device driver by short name
+   *
+   * @param name name of the device, ie. `md0`
+   *
+   */
+  std::string getPathByDevName(std::string name) override;
+
+  /**
+   * @brief gets the device name by its major and minor number
+   *
+   * @param major major number
+   * @param minor minor number
+   *
+   */
+  std::string getDevName(int major, int minor) override;
 };
 
 /**
@@ -125,13 +153,7 @@ void useUdevListEntries(
   f(device_entries, handle.get());
 }
 
-/**
- * @brief gets the path to device driver by short name
- *
- * @param name name of the device, ie. `md0`
- *
- */
-std::string getPathByDevName(std::string name) {
+std::string MD::getPathByDevName(std::string name) {
   std::string devPath;
   useUdevListEntries(
       "block",
@@ -153,11 +175,13 @@ std::string getPathByDevName(std::string name) {
           if (strcmp(name.c_str(), &devName[strlen(devName) - name.length()]) ==
               0) {
             devPath = devName;
+
             /* If full filepath is not returned, we assume name is a child in
              * udev root*/
             if (devPath.find("/") != 0) {
               devPath = "/dev/" + devPath;
             }
+
             break;
           } else {
             devName = "";
@@ -168,14 +192,7 @@ std::string getPathByDevName(std::string name) {
   return devPath;
 }
 
-/**
- * @brief gets the device name by its major and minor number
- *
- * @param major major number
- * @param minor minor number
- *
- */
-std::string getDevName(int major, int minor) {
+std::string MD::getDevName(int major, int minor) {
   std::string devName = "unknown";
 
   useUdevListEntries(
@@ -259,53 +276,45 @@ std::string getDiskStateStr(int state) {
     s += "clusteradd ";
 #endif
 
+  trimStr(s);
   return s;
 }
 
-/**
- * @brief request disk information from MD drivers
- *
- * @param arrayName name of the md array, ie. `md0`
- * @param diskNum the disk number used by the system
- *
- * @return copy of mdu_disk_info_t struct
- */
-mdu_disk_info_t getDiskInfo(std::string arrayName, int diskNum) {
-  std::map<std::string, std::string> results;
-  mdu_disk_info_t diskInfo;
-  diskInfo.number = diskNum;
+// For use with unique_ptr of file close as a hacky way of preventing fd leaks
+auto fClose = [](int* fd) { close(*fd); };
 
-  int fd = open(arrayName.c_str(), O_RDONLY);
+bool MD::getDiskInfo(std::string arrayName, mdu_disk_info_t& diskInfo) {
+  std::map<std::string, std::string> results;
+  int fd;
+
+  std::unique_ptr<int, decltype(fClose)> _(
+      &(fd = open(arrayName.c_str(), O_RDONLY)), fClose);
   int status = ioctl(fd, GET_DISK_INFO, &diskInfo);
-  close(fd);
 
   if (status == -1) {
     LOG(WARNING) << "Call to ioctl 'GET_DISK_INFO' " << arrayName
                  << " failed: " << strerror(errno);
-    return diskInfo;
+    return false;
   }
 
-  return diskInfo;
+  return true;
 }
 
-/**
- * @brief request array information from MD drivers
- *
- * @param name name of the md array, ie. `md0`
- * @param array empty struct of mdu_array_info_t; will be filled out with info
- *
- */
-void getArrayInfo(std::string name, mdu_array_info_t& array) {
+bool MD::getArrayInfo(std::string name, mdu_array_info_t& array) {
   std::map<std::string, std::string> results;
+  int fd;
 
-  int fd = open(name.c_str(), O_RDONLY);
+  std::unique_ptr<int, decltype(fClose)> _(&(fd = open(name.c_str(), O_RDONLY)),
+                                           fClose);
   int status = ioctl(fd, GET_ARRAY_INFO, &array);
-  close(fd);
 
   if (status == -1) {
     LOG(ERROR) << "Call to ioctl 'GET_ARRAY_INFO' for " << name
                << " failed: " << strerror(errno);
+    return false;
   }
+
+  return true;
 }
 
 inline void getLines(std::vector<std::string>& lines) {
@@ -341,22 +350,12 @@ MDDrive parseMDDrive(std::string& name) {
   return drive;
 }
 
-/**
- * @brief Parse mdstat text blob into MDStat struct
- *
- * @param result reference to a MDStat struct to store results into
- *
- * This function makes assumption about the structure of the mdstat text blobs.
- * If the structure is not what it expects, the logs a warning message and
- * moves on.
- *
- */
-void parseMDStat(MDStat& result) {
+void MD::parseMDStat(std::vector<std::string> lines, MDStat& result) {
   // Will be used to determine starting point of lines to work on.
   size_t n = 0;
 
-  std::vector<std::string> lines;
-  getLines(lines);
+  // std::vector<std::string> lines;
+  // getLines(lines);
 
   if (lines.size() < 1) {
     return;
@@ -472,29 +471,33 @@ void parseMDStat(MDStat& result) {
   }
 }
 
-/**
- * @brief gets all the drive information associated with a particular array.
- *
- * @param arrayName name of the md array, ie. `md0`
- * @param data QueryData to be filed out
- *
- */
-void getDrivesForArray(std::string arrayName, QueryData& data) {
-  std::string path(getPathByDevName(arrayName));
+void getDrivesForArray(std::string arrayName,
+                       MDInterface& md,
+                       QueryData& data) {
+  std::string path(md.getPathByDevName(arrayName));
   if (path == "") {
     LOG(ERROR) << "Could not get file path for " << arrayName;
     return;
   }
   mdu_array_info_t array;
-  getArrayInfo(path, array);
+  bool ok = md.getArrayInfo(path, array);
+  if (!ok) {
+    return;
+  }
 
   QueryData temp;
   for (size_t i = 0; i < MD_SB_DISKS; i++) {
-    mdu_disk_info_t disk = getDiskInfo(path, i);
+    mdu_disk_info_t disk;
+    disk.number = i;
+    ok = md.getDiskInfo(path, disk);
+    if (!ok) {
+      continue;
+    }
+
     if (disk.major > 0) {
       Row r;
       r["md_device_name"] = arrayName;
-      r["drive_name"] = getDevName(disk.major, disk.minor);
+      r["drive_name"] = md.getDevName(disk.major, disk.minor);
       r["state"] = getDiskStateStr(disk.state);
       r["slot"] = std::to_string(disk.raid_disk);
 
@@ -513,13 +516,18 @@ void getDrivesForArray(std::string arrayName, QueryData& data) {
   }
 
   // Find removed disks if number of rows don't match with array raid disks
-  for (size_t slot = 0; slot < array.raid_disks; slot++) {
+  for (int slot = 0; slot < array.raid_disks; slot++) {
     bool found = false;
     int softRemoved = -1;
+
     for (size_t i = 0; i < temp.size(); i++) {
       if (std::stoi(temp[i]["slot"]) == slot) {
         found = true;
+
       } else if (std::stoi(temp[i]["slot"]) < 0) {
+        /* Becase we iterate to the end, the softRemoved value will be the last
+         * disk that is marked faulty.  We have to walk over the entire vector,
+         * because a missing slot can show up at a later number. */
         softRemoved = i;
       }
     }
@@ -536,8 +544,8 @@ void getDrivesForArray(std::string arrayName, QueryData& data) {
         Row r;
         r["md_device_name"] = arrayName;
         r["drive_name"] = "unknown";
-        r["slot"] = std::to_string(slot);
         r["state"] = "removed";
+        r["slot"] = std::to_string(slot);
         temp.push_back(r);
         continue;
       }
@@ -550,12 +558,15 @@ void getDrivesForArray(std::string arrayName, QueryData& data) {
 
 QueryData genMDDrives(QueryContext& context) {
   QueryData results;
-
   MDStat mds;
-  parseMDStat(mds);
+  MD md;
+  std::vector<std::string> lines;
+  getLines(lines);
+
+  md.parseMDStat(lines, mds);
 
   for (auto& device : mds.devices) {
-    getDrivesForArray(device.name, results);
+    getDrivesForArray(device.name, md, results);
   }
 
   return results;
@@ -564,8 +575,12 @@ QueryData genMDDrives(QueryContext& context) {
 QueryData genMDDevices(QueryContext& context) {
   QueryData results;
   MDStat mds;
+  MD md;
+  std::vector<std::string> lines;
 
-  parseMDStat(mds);
+  getLines(lines);
+
+  md.parseMDStat(lines, mds);
   for (auto& device : mds.devices) {
     Row r;
     r["device_name"] = device.name;
@@ -648,8 +663,12 @@ QueryData genMDDevices(QueryContext& context) {
 QueryData genMDPersonalities(QueryContext& context) {
   QueryData results;
   MDStat mds;
+  std::vector<std::string> lines;
+  MD md;
 
-  parseMDStat(mds);
+  getLines(lines);
+
+  md.parseMDStat(lines, mds);
 
   std::vector<std::string> enabledPersonalities = split(mds.personalities, " ");
   for (auto& setting : enabledPersonalities) {
