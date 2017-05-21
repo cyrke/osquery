@@ -20,11 +20,10 @@
 #include <fstream>
 #include <memory>
 
+#include <osquery/core/conversions.h>
 #include <osquery/logger.h>
 
 #include "osquery/events/linux/udev.h"
-#include <osquery/core/conversions.h>
-
 #include "osquery/tables/system/linux/md_tables.h"
 
 namespace osquery {
@@ -83,6 +82,14 @@ class MD : public MDInterface {
    *
    */
   std::string getDevName(int major, int minor) override;
+
+  /**
+   * @brief gets the superblock version of the array
+   *
+   * @param name name of the array device
+   *
+   */
+  std::string getSuperblkVersion(std::string arrayName) override;
 };
 
 /**
@@ -121,19 +128,19 @@ void trimStr(std::vector<std::string>& strs, const char c = ' ') {
 }
 
 /**
- * @brief convenience function for working a with a udev subsystem
+ * @brief function for walking thru a udev subsystem and working on devices
  *
  * @param systemName the name of the sysfs subsytem to work with
- * @param f function to execute on the subsystem
+ * @param f function to execute on the subsystem; returns true if can break the
+ * device loop, false to keep walking
  *
  */
-void useUdevListEntries(
-    std::string systemName,
-    std::function<void(udev_list_entry* const&, udev* const&)> f) {
+void walkUdevDevices(std::string systemName,
+                     std::function<bool(udev_device* const&)> f) {
   auto delUdev = [](udev* u) { udev_unref(u); };
   std::unique_ptr<udev, decltype(delUdev)> handle(udev_new(), delUdev);
   if (handle.get() == nullptr) {
-    LOG(ERROR) << "Could not get udev handle";
+    LOG(ERROR) << "Could not get udev handle\n";
     return;
   }
 
@@ -141,7 +148,7 @@ void useUdevListEntries(
   std::unique_ptr<udev_enumerate, decltype(delUdevEnum)> udevEnum(
       udev_enumerate_new(handle.get()), delUdevEnum);
   if (udevEnum.get() == nullptr) {
-    LOG(ERROR) << "Could not get enumerate handle";
+    LOG(ERROR) << "Could not get enumerate handle\n";
     return;
   }
 
@@ -150,44 +157,40 @@ void useUdevListEntries(
   udev_list_entry* device_entries =
       udev_enumerate_get_list_entry(udevEnum.get());
 
-  f(device_entries, handle.get());
+  udev_list_entry* entry;
+  udev_list_entry_foreach(entry, device_entries) {
+    const char* path = udev_list_entry_get_name(entry);
+
+    auto delUdevDevice = [](udev_device* d) { udev_device_unref(d); };
+    std::unique_ptr<udev_device, decltype(delUdevDevice)> device(
+        udev_device_new_from_syspath(handle.get(), path), delUdevDevice);
+    if (device.get() == nullptr) {
+      LOG(ERROR) << "Could not get udev device handle\n";
+      continue;
+    }
+    if (f(device.get())) {
+      break;
+    }
+  }
 }
 
 std::string MD::getPathByDevName(std::string name) {
   std::string devPath;
-  useUdevListEntries(
-      "block",
-      [&](udev_list_entry* const& device_entries, udev* const& handle) {
-        udev_list_entry* entry;
-        udev_list_entry_foreach(entry, device_entries) {
-          const char* path = udev_list_entry_get_name(entry);
 
-          auto delUdevDevice = [](udev_device* d) { udev_device_unref(d); };
-          std::unique_ptr<udev_device, decltype(delUdevDevice)> device(
-              udev_device_new_from_syspath(handle, path), delUdevDevice);
-          if (device.get() == nullptr) {
-            LOG(ERROR) << "Could not get udev device handle";
-            continue;
-          }
+  walkUdevDevices("block", [&](udev_device* const& device) {
+    const char* devName = udev_device_get_property_value(device, "DEVNAME");
 
-          const char* devName =
-              udev_device_get_property_value(device.get(), "DEVNAME");
-          if (strcmp(name.c_str(), &devName[strlen(devName) - name.length()]) ==
-              0) {
-            devPath = devName;
+    if (strcmp(name.c_str(), &devName[strlen(devName) - name.length()]) == 0) {
+      devPath = devName;
+      if (devPath.find('/') != 0) {
+        devPath = "/dev/" + devPath;
+      }
 
-            /* If full filepath is not returned, we assume name is a child in
-             * udev root*/
-            if (devPath.find("/") != 0) {
-              devPath = "/dev/" + devPath;
-            }
+      return true;
+    }
 
-            break;
-          } else {
-            devName = "";
-          }
-        }
-      });
+    return false;
+  });
 
   return devPath;
 }
@@ -195,35 +198,37 @@ std::string MD::getPathByDevName(std::string name) {
 std::string MD::getDevName(int major, int minor) {
   std::string devName = "unknown";
 
-  useUdevListEntries(
-      "block",
-      [&](udev_list_entry* const& device_entries, udev* const& handle) {
+  walkUdevDevices("block", [&](udev_device* const& device) {
+    const char* devMajor = udev_device_get_property_value(device, "MAJOR");
+    const char* devMinor = udev_device_get_property_value(device, "MINOR");
 
-        udev_list_entry* entry;
-        udev_list_entry_foreach(entry, device_entries) {
-          const char* path = udev_list_entry_get_name(entry);
+    if (std::stoi(devMajor) == major && std::stoi(devMinor) == minor) {
+      devName = udev_device_get_property_value(device, "DEVNAME");
+      return true;
+    }
 
-          auto delUdevDevice = [](udev_device* d) { udev_device_unref(d); };
-          std::unique_ptr<udev_device, decltype(delUdevDevice)> device(
-              udev_device_new_from_syspath(handle, path), delUdevDevice);
-          if (device.get() == nullptr) {
-            LOG(ERROR) << "Could not get udev device handle";
-            continue;
-          }
-
-          const char* devMajor =
-              udev_device_get_property_value(device.get(), "MAJOR");
-          const char* devMinor =
-              udev_device_get_property_value(device.get(), "MINOR");
-
-          if (std::stoi(devMajor) == major && std::stoi(devMinor) == minor) {
-            devName = udev_device_get_property_value(device.get(), "DEVNAME");
-            break;
-          }
-        }
-      });
+    return false;
+  });
 
   return devName;
+}
+
+std::string MD::getSuperblkVersion(std::string arrayName) {
+  std::string version;
+
+  walkUdevDevices("block", [&](udev_device* const& device) {
+    const char* devName = udev_device_get_property_value(device, "DEVNAME");
+
+    if (strcmp(arrayName.c_str(),
+               &devName[strlen(devName) - arrayName.length()]) == 0) {
+      version = udev_device_get_property_value(device, "MD_METADATA");
+      return true;
+    }
+
+    return false;
+  });
+
+  return version;
 }
 
 /**
@@ -274,6 +279,58 @@ std::string getDiskStateStr(int state) {
 #ifdef MD_DISK_CLUSTER_ADD
   if ((1 << MD_DISK_CLUSTER_ADD) & 1)
     s += "clusteradd ";
+#endif
+
+  trimStr(s);
+  return s;
+}
+
+/**
+ * @brief resolves superblock state field to string representation
+ *
+ * @param  state state field of mdu_array_info_t
+ *
+ * @return stringified state
+ */
+std::string getSuperBlkStateStr(int state) {
+  if (state == 0)
+    return "unknown";
+
+  std::string s;
+
+#ifdef MD_SB_CLEAN
+  if ((1 << MD_SB_CLEAN) & state)
+    s += "clean ";
+#endif
+
+#ifdef MD_SB_ERRORS
+  if ((1 << MD_SB_ERRORS) & state)
+    s += "errors ";
+#endif
+
+#ifdef MD_SB_BBM_ERRORS
+  if ((1 << MD_SB_BBM_ERRORS) & state)
+    s += "bbm_errors ";
+#endif
+
+#ifdef MD_SB_BLOCK_CONTAINER_RESHAPE
+  if ((1 << MD_SB_BLOCK_CONTAINER_RESHAPE) & 1)
+    s += "container_reshape ";
+#endif
+
+#ifdef MD_SB_BLOCK_VOLUME
+  if ((1 << MD_SB_BLOCK_VOLUME) & 1)
+    s += "block_activation ";
+#endif
+
+#ifdef MD_SB_CLUSTERED
+  if ((1 << MD_SB_CLUSTERED) & 1)
+    s += "clustered ";
+#endif
+
+#ifdef MD_SB_BITMAP_PRESENT
+  if ((1 << MD_SB_BITMAP_PRESENT) & 1)
+    s += "bitmap_present ";
 #endif
 
   trimStr(s);
@@ -334,6 +391,60 @@ inline void getLines(std::vector<std::string>& lines) {
   }
 }
 
+inline void parseMDPersonalities(std::string& line,
+                                 std::vector<std::string>& result) {
+  std::vector<std::string> enabledPersonalities = split(line, " ");
+  for (auto& p : enabledPersonalities) {
+    trimStr(p);
+    result.push_back(p.substr(1, p.length() - 2));
+  }
+}
+
+void parseMDAction(std::string& line, MDAction& result) {
+  /* Make assumption that recovery/resync format is [d+]% ([d+]/[d+])
+   * finish=<duration> speed=<rate> */
+  std::vector<std::string> pieces(split(line, " "));
+  if (pieces.size() != 4) {
+    LOG(WARNING) << "Unexpected recovery/resync line format: " << line;
+    return;
+  }
+  trimStr(pieces);
+
+  result.progress = pieces[0] + " " + pieces[1];
+
+  std::size_t start = pieces[2].find_first_not_of("finish=");
+  if (start != std::string::npos) {
+    result.finish = pieces[2].substr(start);
+  } else {
+    result.finish = pieces[2];
+  }
+
+  start = pieces[3].find_first_not_of("speed=");
+  if (start != std::string::npos) {
+    result.speed = pieces[3].substr(start);
+  } else {
+    result.speed = pieces[3];
+  }
+}
+
+void parseMDBitmap(std::string& line, MDBitmap& result) {
+  std::vector<std::string> bitmapInfos(split(line, ","));
+  if (bitmapInfos.size() < 2) {
+    LOG(WARNING) << "Unexpected bitmap line structure: " << line;
+  } else {
+    trimStr(bitmapInfos);
+    result.onMem = bitmapInfos[0];
+    result.chunkSize = bitmapInfos[1];
+
+    std::size_t pos;
+    if (bitmapInfos.size() > 2 &&
+        (pos = bitmapInfos[2].find("file:")) != std::string::npos) {
+      result.externalFile = bitmapInfos[2].substr(pos + sizeof("file:") - 1);
+      trimStr(result.externalFile);
+    }
+  }
+}
+
 MDDrive parseMDDrive(std::string& name) {
   MDDrive drive;
   drive.name = name;
@@ -354,16 +465,15 @@ void MD::parseMDStat(std::vector<std::string> lines, MDStat& result) {
   // Will be used to determine starting point of lines to work on.
   size_t n = 0;
 
-  // std::vector<std::string> lines;
-  // getLines(lines);
-
   if (lines.size() < 1) {
     return;
   }
 
   // This should always evaluate to true, but just in case we check.
   if (lines[0].find("Personalities :") != std::string::npos) {
-    result.personalities = lines[0].substr(sizeof("Personalities :") - 1);
+    std::string pline(lines[0].substr(sizeof("Personalities :") - 1));
+    parseMDPersonalities(pline, result.personalities);
+
     n = 1;
 
   } else {
@@ -404,7 +514,13 @@ void MD::parseMDStat(std::vector<std::string> lines, MDStat& result) {
 
       } else {
         trimStr(configline);
-        mdd.usableSize = configline[0] + " " + configline[1];
+        // mdd.usableSize = configline[0] + " " + configline[1];
+        if (configline[1] == "blocks") {
+          mdd.usableSize = std::stoll(configline[0]);
+        } else {
+          LOG(WARNING) << "Did not find size in mdstat for " << mdd.name;
+        }
+
         mdd.healthyDrives = configline[configline.size() - 2];
         mdd.driveStatuses = configline[configline.size() - 1];
 
@@ -421,33 +537,41 @@ void MD::parseMDStat(std::vector<std::string> lines, MDStat& result) {
       std::size_t pos;
       while (true) {
         if ((pos = lines[n + 1].find("recovery =")) != std::string::npos) {
-          mdd.recovery = lines[n + 1].substr(pos + sizeof("recovery =") - 1);
-          trimStr(mdd.recovery);
+          std::string recovery(
+              lines[n + 1].substr(pos + sizeof("recovery =") - 1));
+          trimStr(recovery);
+          parseMDAction(recovery, mdd.recovery);
           // Add an extra line for next iteration if so..
           n += 1;
 
         } else if ((pos = lines[n + 1].find("resync =")) != std::string::npos) {
-          mdd.resync = lines[n + 1].substr(pos + sizeof("resync =") - 1);
-          trimStr(mdd.resync);
+          std::string resync(lines[n + 1].substr(pos + sizeof("resync =") - 1));
+          trimStr(resync);
+          parseMDAction(resync, mdd.resync);
           // Add an extra line for next iteration if so..
           n += 1;
 
         } else if ((pos = lines[n + 1].find("reshape =")) !=
                    std::string::npos) {
-          mdd.reshape = lines[n + 1].substr(pos + sizeof("reshape =") - 1);
-          trimStr(mdd.reshape);
+          std::string reshape(
+              lines[n + 1].substr(pos + sizeof("reshape =") - 1));
+          trimStr(reshape);
+          parseMDAction(reshape, mdd.reshape);
           // Add an extra line for next iteration if so..
           n += 1;
 
         } else if ((pos = lines[n + 1].find("check =")) != std::string::npos) {
-          mdd.checkArray = lines[n + 1].substr(pos + sizeof("check =") - 1);
-          trimStr(mdd.checkArray);
+          std::string checkArray(
+              lines[n + 1].substr(pos + sizeof("check =") - 1));
+          trimStr(checkArray);
+          parseMDAction(checkArray, mdd.checkArray);
           // Add an extra line for next iteration if so..
           n += 1;
 
         } else if ((pos = lines[n + 1].find("bitmap:")) != std::string::npos) {
-          mdd.bitmap = lines[n + 1].substr(pos + sizeof("bitmap:") - 1);
-          trimStr(mdd.bitmap);
+          std::string bitmap(lines[n + 1].substr(pos + sizeof("bitmap:") - 1));
+          trimStr(bitmap);
+          parseMDBitmap(bitmap, mdd.bitmap);
           // Add an extra line for next iteration if so..
           n += 1;
           // If none of above, then we can break out of loop
@@ -499,7 +623,7 @@ void getDrivesForArray(std::string arrayName,
       r["md_device_name"] = arrayName;
       r["drive_name"] = md.getDevName(disk.major, disk.minor);
       r["state"] = getDiskStateStr(disk.state);
-      r["slot"] = std::to_string(disk.raid_disk);
+      r["slot"] = INTEGER(disk.raid_disk);
 
       /* We have to check here b/c otherwise we have no idea if the slot has
        * been recovered.  We assume that if the disk number is less than the
@@ -582,76 +706,66 @@ QueryData genMDDevices(QueryContext& context) {
 
   md.parseMDStat(lines, mds);
   for (auto& device : mds.devices) {
+    std::string path(md.getPathByDevName(device.name));
+    if (path == "") {
+      LOG(ERROR) << "Could not get file path for " << device.name;
+      return results;
+    }
+
+    mdu_array_info_t array;
+    bool ok = md.getArrayInfo(path, array);
+    if (!ok) {
+      return results;
+    }
+
     Row r;
     r["device_name"] = device.name;
     r["status"] = device.status;
-    r["raid_level"] = device.raidLevel;
-    r["healthy_drives"] = device.healthyDrives;
-    r["usable_size"] = device.usableSize;
+    r["raid_level"] = INTEGER(array.level);
+    r["size"] = BIGINT(device.usableSize);
+    r["chunk_size"] = BIGINT(array.chunk_size);
+    r["raid_disks"] = INTEGER(array.raid_disks);
+    r["nr_raid_disks"] = INTEGER(array.nr_disks);
+    r["working_disks"] = INTEGER(array.working_disks);
+    r["active_disks"] = INTEGER(array.active_disks);
+    r["failed_disks"] = INTEGER(array.failed_disks);
+    r["spare_disks"] = INTEGER(array.spare_disks);
 
-    // Handle recovery & resync
-    /* Make assumption that recovery/resync format is [d+]% ([d+]/[d+])
-     * finish=<duration> speed=<rate> */
-    auto handleR = [&r](std::string& line, std::string prefix) {
-      std::vector<std::string> pieces(split(line, " "));
-      if (pieces.size() != 4) {
-        LOG(WARNING) << "Unexpected recovery/resync line format: " << line;
-        return;
-      }
-      trimStr(pieces);
+    r["superblock_state"] = getSuperBlkStateStr(array.state);
+    r["superblock_version"] = md.getSuperblkVersion(device.name);
+    r["superblock_update_time"] = BIGINT(array.utime);
 
-      r[prefix + "_progress"] = pieces[0] + " " + pieces[1];
-
-      std::size_t start = pieces[2].find_first_not_of("finish=");
-      if (start != std::string::npos) {
-        r[prefix + "_finish"] = pieces[2].substr(start);
-      } else {
-        r[prefix + "_finish"] = pieces[2];
-      }
-
-      start = pieces[3].find_first_not_of("speed=");
-      if (start != std::string::npos) {
-        r[prefix + "_speed"] = pieces[3].substr(start);
-      } else {
-        r[prefix + "_speed"] = pieces[3];
-      }
-    };
-
-    if (device.recovery != "") {
-      handleR(device.recovery, "discovery");
+    if (device.recovery.progress != "") {
+      r["recovery_progress"] = device.recovery.progress;
+      r["recovery_finish"] = device.recovery.finish;
+      r["recovery_speed"] = device.recovery.speed;
     }
 
-    if (device.resync != "") {
-      handleR(device.resync, "resync");
+    if (device.resync.progress != "") {
+      r["resync_progress"] = device.resync.progress;
+      r["resync_finish"] = device.resync.finish;
+      r["resync_speed"] = device.resync.speed;
     }
 
-    if (device.reshape != "") {
-      handleR(device.reshape, "reshape");
+    if (device.reshape.progress != "") {
+      r["reshape_progress"] = device.reshape.progress;
+      r["reshape_finish"] = device.reshape.finish;
+      r["reshape_speed"] = device.reshape.speed;
     }
 
-    if (device.checkArray != "") {
-      handleR(device.checkArray, "check_array");
+    if (device.checkArray.progress != "") {
+      r["check_array_progress"] = device.checkArray.progress;
+      r["check_array_finish"] = device.checkArray.finish;
+      r["check_array_speed"] = device.checkArray.speed;
     }
 
-    if (device.bitmap != "") {
-      std::vector<std::string> bitmapInfos(split(device.bitmap, ","));
-      if (bitmapInfos.size() < 2) {
-        LOG(WARNING) << "Unexpected bitmap line structure: " << device.bitmap;
-      } else {
-        trimStr(bitmapInfos);
-        r["bitmap_on_mem"] = bitmapInfos[0];
-        r["bitmap_chunk_size"] = bitmapInfos[1];
-
-        std::size_t pos;
-        if (bitmapInfos.size() > 2 &&
-            (pos = bitmapInfos[2].find("file:")) != std::string::npos) {
-          r["bitmap_external_file"] =
-              bitmapInfos[2].substr(pos + sizeof("file:") - 1);
-          trimStr(r["bitmap_external_file"]);
-        }
-      }
+    if (device.bitmap.onMem != "") {
+      r["bitmap_on_mem"] = device.bitmap.onMem;
+      r["bitmap_chunk_size"] = device.bitmap.chunkSize;
+      r["bitmap_external_file"] = device.bitmap.externalFile;
     }
 
+    r["other"] = device.other;
     r["unused_devices"] = mds.unused;
 
     results.push_back(r);
@@ -670,10 +784,7 @@ QueryData genMDPersonalities(QueryContext& context) {
 
   md.parseMDStat(lines, mds);
 
-  std::vector<std::string> enabledPersonalities = split(mds.personalities, " ");
-  for (auto& setting : enabledPersonalities) {
-    trimStr(setting);
-    std::string name(setting.substr(1, setting.length() - 2));
+  for (auto& name : mds.personalities) {
     Row r = {{"name", name}};
 
     results.push_back(r);

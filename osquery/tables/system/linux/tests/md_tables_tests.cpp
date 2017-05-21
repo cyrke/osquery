@@ -28,6 +28,7 @@ class MockMD : public MDInterface {
   MOCK_METHOD2(parseMDStat, void(std::vector<std::string>, MDStat&));
   MOCK_METHOD1(getPathByDevName, std::string(std::string));
   MOCK_METHOD2(getDevName, std::string(int, int));
+  MOCK_METHOD1(getSuperblkVersion, std::string(std::string));
 };
 
 class GetDrivesForArrayTest : public ::testing::Test {};

@@ -23,24 +23,36 @@ struct MDDrive {
   size_t pos;
 };
 
+struct MDAction {
+  std::string progress;
+  std::string finish;
+  std::string speed;
+};
+
+struct MDBitmap {
+  std::string onMem;
+  std::string chunkSize;
+  std::string externalFile;
+};
+
 struct MDDevice {
   std::string name;
   std::string status;
   std::string raidLevel;
-  std::string usableSize;
+  long usableSize;
   std::string other;
   std::vector<MDDrive> drives;
   std::string healthyDrives;
   std::string driveStatuses;
-  std::string recovery;
-  std::string resync;
-  std::string reshape;
-  std::string bitmap;
-  std::string checkArray;
+  MDAction recovery;
+  MDAction resync;
+  MDAction reshape;
+  MDAction checkArray;
+  MDBitmap bitmap;
 };
 
 struct MDStat {
-  std::string personalities;
+  std::vector<std::string> personalities;
   std::vector<MDDevice> devices;
   std::string unused;
 };
@@ -97,6 +109,14 @@ class MDInterface {
    *
    */
   virtual std::string getDevName(int major, int minor) = 0;
+
+  /**
+   * @brief gets the superblock version of the array
+   *
+   * @param name name of the array device
+   *
+   */
+  virtual std::string getSuperblkVersion(std::string arrayName) = 0;
 
  public:
   virtual ~MDInterface() {}
