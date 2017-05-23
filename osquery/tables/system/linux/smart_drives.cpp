@@ -28,7 +28,7 @@ namespace tables {
 
 struct explicitDevice {
   std::string driver;
-  int maxID;
+  size_t maxID;
 };
 
 // delUdevDevice is a lambda function meant to be used with smart pointers for
@@ -157,19 +157,12 @@ void walkSmartDevices(std::function<void(libsmartctl::Client&,
   for (auto const& dev : devs) {
     bool found = false;
     for (auto const& type : types) {
-      // If type is not null can skip the partitions
-      // THIS ASSUMPTION IS NO LONGER VALID see
-      // `nyc3nas10.nyc3.internal.digitalocean.com`
-      // if (dev.find_first_of("0123456789") != std::string::npos) {
-      //   continue;
-      // }
-
       for (size_t i = 0; i <= type.maxID; i++) {
         std::string fullType = type.driver + std::to_string(i);
 
         libsmartctl::CantIdDevResp cantId = c.cantIdDev(dev, fullType);
         if (cantId.err != NOERR) {
-          LOG(WARNING) << "Error while trying to identify device";
+          LOG(INFO) << "Error while trying to identify device: " << cantId.err;
           continue;
         }
         // If device is not identifiable, the type is invalid, skip
@@ -205,7 +198,7 @@ QueryData genSmartDevInformation(QueryContext& context) {
     }
 
     if (i > -1) {
-      resp.content["device_id"] = std::to_string(i);
+      resp.content["disk_id"] = std::to_string(i);
     }
 
     resp.content["device_name"] = dev;
@@ -229,11 +222,11 @@ QueryData genSmartDevVendorAttrs(QueryContext& context) {
           << resp.err;
       return;
     }
-    // Walk thru attributes to append device name to each vendor attribute map
-    // and append to results.
+    /* Walk thru attributes to append device name to each vendor attribute map
+     * and append to results. */
     for (auto& va : resp.content) {
       if (i > -1) {
-        va["device_id"] = std::to_string(i);
+        va["disk_id"] = std::to_string(i);
       }
 
       va["device_name"] = dev;
@@ -243,5 +236,5 @@ QueryData genSmartDevVendorAttrs(QueryContext& context) {
 
   return results;
 }
-}
-}
+} // namespace tables
+} // namespace osquery
