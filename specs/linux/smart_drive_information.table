@@ -2,7 +2,7 @@ table_name("smart_drive_information")
 description("Drive information read by SMART controller")
 schema([
     Column("device_name", TEXT, "Name of block device", index=True),
-    Column("device_id", INTEGER,
+    Column("disk_id", INTEGER,
         "Physical device id of device, only valid when hardware storage controller exists"),
     Column("model_family", TEXT, "Drive model family"),
     Column("device_model", TEXT, "Device Model"),
